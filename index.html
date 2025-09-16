@@ -63,6 +63,45 @@
     <div id="warnings" class="warnings"></div>
   </section>
 
+  <!-- Панель вкладок визуализации -->
+  <section class="tabs">
+    <button id="tabTime" class="tab active">Время</button>
+    <button id="tabFFT" class="tab">Спектр (FFT)</button>
+  </section>
+
+  <!-- Раздел спектра -->
+  <section class="spectrum hidden">
+    <h2>Спектр (FFT)</h2>
+    <div class="control-group">
+      <label for="fftSize">Размер FFT:</label>
+      <select id="fftSize">
+        <option value="2048">2048</option>
+        <option value="4096" selected>4096</option>
+        <option value="8192">8192</option>
+        <option value="16384">16384</option>
+      </select>
+    </div>
+    <div class="control-group">
+      <label for="windowType">Окно:</label>
+      <select id="windowType">
+        <option value="rect" selected>Прямоугольное</option>
+        <option value="hann">Hann</option>
+        <option value="hamming">Hamming</option>
+      </select>
+    </div>
+    <div class="control-group">
+      <label for="fftLog">Логарифмическая шкала (дБ):</label>
+      <input id="fftLog" type="checkbox" checked />
+    </div>
+    <div class="control-group">
+      <label for="peakCount">Пики (шт):</label>
+      <input id="peakCount" type="number" min="0" max="20" step="1" value="5" />
+      <button id="recalcFFTBtn">Пересчитать спектр</button>
+    </div>
+    <canvas id="fftCanvas" width="1000" height="240"></canvas>
+    <div id="fftInfo" class="badge"></div>
+  </section>
+
   <footer>
     <small>Подсказка: для корректного старта аудио необходимо взаимодействие пользователя (кнопка «Воспроизвести»).</small>
   </footer>

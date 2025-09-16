@@ -58,6 +58,31 @@
   /** @type {HTMLButtonElement} */
   const fitAllBtn = document.getElementById('fitAllBtn');
 
+  // Вкладки и элементы спектра (FFT)
+  /** @type {HTMLButtonElement} */
+  const tabTime = document.getElementById('tabTime');
+  /** @type {HTMLButtonElement} */
+  const tabFFT = document.getElementById('tabFFT');
+  /** @type {HTMLElement} */
+  const vizSection = document.querySelector('section.viz');
+  /** @type {HTMLElement} */
+  const spectrumSection = document.querySelector('section.spectrum');
+  /** @type {HTMLSelectElement} */
+  const fftSizeEl = document.getElementById('fftSize');
+  /** @type {HTMLSelectElement} */
+  const windowTypeEl = document.getElementById('windowType');
+  /** @type {HTMLInputElement} */
+  const fftLogEl = document.getElementById('fftLog');
+  /** @type {HTMLInputElement} */
+  const peakCountEl = document.getElementById('peakCount');
+  /** @type {HTMLButtonElement} */
+  const recalcFFTBtn = document.getElementById('recalcFFTBtn');
+  /** @type {HTMLCanvasElement} */
+  const fftCanvas = document.getElementById('fftCanvas');
+  const fftCtx = fftCanvas ? fftCanvas.getContext('2d') : null;
+  /** @type {HTMLDivElement} */
+  const fftInfo = document.getElementById('fftInfo');
+
   // Текущее собранное аудио (последний рассчитанный буфер)
   let lastBuffer = null; // Float32Array
   let lastComputed = null; // объект с метаданными расчёта
@@ -175,7 +200,7 @@
     const fInput = document.createElement('input');
     fInput.type = 'number'; fInput.step = '1'; fInput.min = '0'; fInput.max = '20000';
     fInput.value = String(src.freq);
-    // Бегунок частоты (логарифмический), 20..20000 Гц
+    // Бегунок частоты (линейный), 20..20000 Гц
     const fSlider = document.createElement('input');
     fSlider.type = 'range'; fSlider.min = '20'; fSlider.max = '20000'; fSlider.step = '1';
     fSlider.value = String(clamp(src.freq || 0, 20, 20000));
@@ -267,6 +292,7 @@
       const isNoise = t === 'noise';
       // Частота и фаза неактуальны для DC; фаза неактуальна для шума
       fInput.disabled = isDC || isNoise;
+      fSlider.disabled = isDC || isNoise;
       phInput.disabled = isDC || isNoise;
       // Доп. параметр доступен только у некоторых
       exLabel.textContent = extraLabelFor(t);
@@ -529,6 +555,10 @@
     clampViewToSignal();
     drawWave(lastBuffer);
     showWarnings(lastComputed.warnings);
+    // Если открыта вкладка спектра — пересчитаем и его
+    if (isFFTActive()) {
+      recalcFFTAndDraw();
+    }
   }
 
   // Воспроизведение
@@ -668,6 +698,257 @@
 
   exportWavBtn.addEventListener('click', exportWav);
   exportCsvBtn.addEventListener('click', exportCsv);
+
+  // ===== Спектр (FFT) =====
+  function isFFTActive() {
+    return tabFFT && tabFFT.classList.contains('active');
+  }
+
+  function getFFTSize() {
+    return parseInt(fftSizeEl?.value || '4096', 10) || 4096;
+  }
+  function getWindowType() {
+    return windowTypeEl?.value || 'rect';
+  }
+  function isFFTLog() {
+    return !!fftLogEl?.checked;
+  }
+  function getPeakCount() {
+    return clamp(parseInt(peakCountEl?.value || '5', 10) || 5, 0, 20);
+  }
+
+  // Построение окон
+  function makeWindow(N, type) {
+    const w = new Float32Array(N);
+    switch (type) {
+      case 'hann':
+        for (let n = 0; n < N; n++) w[n] = 0.5 - 0.5 * Math.cos((2 * Math.PI * n) / (N - 1));
+        break;
+      case 'hamming':
+        for (let n = 0; n < N; n++) w[n] = 0.54 - 0.46 * Math.cos((2 * Math.PI * n) / (N - 1));
+        break;
+      case 'rect':
+      default:
+        for (let n = 0; n < N; n++) w[n] = 1;
+        break;
+    }
+    return w;
+  }
+
+  // Быстрое преобразование Фурье (radix-2, in-place)
+  function fftRadix2(re, im) {
+    const N = re.length;
+    // бит-реверс перестановка
+    let j = 0;
+    for (let i = 0; i < N; i++) {
+      if (i < j) {
+        let tr = re[i]; re[i] = re[j]; re[j] = tr;
+        let ti = im[i]; im[i] = im[j]; im[j] = ti;
+      }
+      let m = N >> 1;
+      while (m >= 1 && j >= m) { j -= m; m >>= 1; }
+      j += m;
+    }
+    // бабочки
+    for (let size = 2; size <= N; size <<= 1) {
+      const half = size >> 1;
+      const theta = -2 * Math.PI / size;
+      const wpr = Math.cos(theta);
+      const wpi = Math.sin(theta);
+      for (let k = 0; k < N; k += size) {
+        let wr = 1, wi = 0;
+        for (let n = 0; n < half; n++) {
+          const i0 = k + n;
+          const i1 = i0 + half;
+          const tr = wr * re[i1] - wi * im[i1];
+          const ti = wr * im[i1] + wi * re[i1];
+          re[i1] = re[i0] - tr;
+          im[i1] = im[i0] - ti;
+          re[i0] += tr;
+          im[i0] += ti;
+          const tmp = wr;
+          wr = tmp * wpr - wi * wpi;
+          wi = tmp * wpi + wi * wpr;
+        }
+      }
+    }
+  }
+
+  function computeFFT() {
+    if (!lastBuffer || !lastComputed) recalcAndDraw();
+    const Fs = lastComputed.Fs;
+    const Nfft = getFFTSize();
+    // Начальная позиция окна: берем по текущему смещению просмотра
+    const startIdx = Math.floor((viewOffsetMs / 1000) * Fs) || 0;
+    const re = new Float32Array(Nfft);
+    const im = new Float32Array(Nfft);
+    const w = makeWindow(Nfft, getWindowType());
+    // Копирование и оконное взвешивание с нулевым дополнением
+    for (let n = 0; n < Nfft; n++) {
+      const i = startIdx + n;
+      const v = (i < lastBuffer.length) ? lastBuffer[i] : 0;
+      re[n] = v * w[n];
+      im[n] = 0;
+    }
+    fftRadix2(re, im);
+    // Амплитудный спектр, односторонний (0..Fs/2)
+    const bins = (Nfft >> 1) + 1;
+    const mags = new Float32Array(bins);
+    const freqs = new Float32Array(bins);
+    const scaleDC = 1 / Nfft; // для DC и Nyquist
+    const scale = 2 / Nfft;   // для остальных (односторонний)
+    for (let k = 0; k < bins; k++) {
+      const m = Math.hypot(re[k], im[k]);
+      const s = (k === 0 || (Nfft % 2 === 0 && k === Nfft / 2)) ? scaleDC : scale;
+      mags[k] = m * s;
+      freqs[k] = (k * Fs) / Nfft;
+    }
+    return { Fs, Nfft, mags, freqs };
+  }
+
+  function findPeaks(mags, freqs, count) {
+    // Простая локальная экстремальность + порог от максимума
+    const peaks = [];
+    let maxVal = 0;
+    for (let i = 1; i < mags.length - 1; i++) maxVal = Math.max(maxVal, mags[i]);
+    const thr = maxVal * 0.02; // 2% от максимума, чтобы отфильтровать шум
+    for (let i = 1; i < mags.length - 1; i++) {
+      if (mags[i] > mags[i - 1] && mags[i] > mags[i + 1] && mags[i] >= thr) {
+        peaks.push({ idx: i, mag: mags[i], freq: freqs[i] });
+      }
+    }
+    peaks.sort((a, b) => b.mag - a.mag);
+    return peaks.slice(0, count);
+  }
+
+  function drawSpectrum(mags, freqs, peaks) {
+    if (!fftCtx || !fftCanvas) return;
+    const W = fftCanvas.width;
+    const H = fftCanvas.height;
+    fftCtx.clearRect(0, 0, W, H);
+    // фон
+    fftCtx.fillStyle = '#0b0f14';
+    fftCtx.fillRect(0, 0, W, H);
+    // оси
+    fftCtx.strokeStyle = '#30363d';
+    fftCtx.lineWidth = 1;
+    fftCtx.beginPath();
+    fftCtx.moveTo(0, H - 20);
+    fftCtx.lineTo(W, H - 20);
+    fftCtx.stroke();
+
+    const maxFreq = (lastComputed?.Fs || getFs()) / 2;
+    const xOfF = (f) => (f / maxFreq) * W;
+
+    // Вычисляем амплитуды: линейные или дБ
+    const useDb = isFFTLog();
+    let values = new Float32Array(mags.length);
+    if (useDb) {
+      const eps = 1e-12;
+      let maxDb = -Infinity, minDb = Infinity;
+      for (let i = 0; i < mags.length; i++) {
+        const db = 20 * Math.log10(mags[i] + eps);
+        values[i] = db;
+        if (db > maxDb) maxDb = db;
+        if (db < minDb) minDb = db;
+      }
+      // ограничим диапазон дБ для отрисовки
+      const top = Math.max(-10, maxDb);
+      const bottom = Math.min(-120, minDb);
+      const yOfDb = (db) => {
+        const t = (db - bottom) / (top - bottom + 1e-9);
+        return (1 - t) * (H - 30) + 10;
+      };
+      // кривая
+      fftCtx.strokeStyle = '#58a6ff';
+      fftCtx.lineWidth = 1.5;
+      fftCtx.beginPath();
+      for (let i = 0; i < values.length; i++) {
+        const x = xOfF(freqs[i]);
+        const y = yOfDb(values[i]);
+        if (i === 0) fftCtx.moveTo(x, y); else fftCtx.lineTo(x, y);
+      }
+      fftCtx.stroke();
+
+      // Пики
+      fftCtx.fillStyle = '#ffa657';
+      fftCtx.strokeStyle = '#ffa657';
+      for (const p of peaks) {
+        const x = xOfF(p.freq);
+        const y = yOfDb(20 * Math.log10(p.mag + 1e-12));
+        fftCtx.beginPath();
+        fftCtx.moveTo(x, H - 20);
+        fftCtx.lineTo(x, y);
+        fftCtx.stroke();
+        fftCtx.fillText(`${Math.round(p.freq)} Гц`, x + 4, y - 4);
+      }
+    } else {
+      // линейный масштаб по амплитуде
+      let vmax = 0;
+      for (let i = 0; i < mags.length; i++) if (mags[i] > vmax) vmax = mags[i];
+      const yOf = (v) => {
+        const t = v / (vmax + 1e-12);
+        return (1 - t) * (H - 30) + 10;
+      };
+      fftCtx.strokeStyle = '#58a6ff';
+      fftCtx.lineWidth = 1.5;
+      fftCtx.beginPath();
+      for (let i = 0; i < mags.length; i++) {
+        const x = xOfF(freqs[i]);
+        const y = yOf(mags[i]);
+        if (i === 0) fftCtx.moveTo(x, y); else fftCtx.lineTo(x, y);
+      }
+      fftCtx.stroke();
+
+      // Пики
+      fftCtx.fillStyle = '#ffa657';
+      fftCtx.strokeStyle = '#ffa657';
+      for (const p of peaks) {
+        const x = xOfF(p.freq);
+        const y = yOf(p.mag);
+        fftCtx.beginPath();
+        fftCtx.moveTo(x, H - 20);
+        fftCtx.lineTo(x, y);
+        fftCtx.stroke();
+        fftCtx.fillText(`${Math.round(p.freq)} Гц`, x + 4, y - 4);
+      }
+    }
+  }
+
+  function recalcFFTAndDraw() {
+    if (!fftCanvas) return;
+    const { mags, freqs, Nfft, Fs } = computeFFT();
+    const peaks = findPeaks(mags, freqs, getPeakCount());
+    drawSpectrum(mags, freqs, peaks);
+    if (fftInfo) {
+      const df = Fs / Nfft;
+      fftInfo.textContent = `N=${Nfft}, Δf≈${df.toFixed(2)} Гц, пики: ${peaks.map(p => `${Math.round(p.freq)} Гц`).join(', ')}`;
+    }
+  }
+
+  // Переключение вкладок
+  function showTimeTab() {
+    if (!vizSection || !spectrumSection) return;
+    tabTime?.classList.add('active');
+    tabFFT?.classList.remove('active');
+    vizSection.classList.remove('hidden');
+    spectrumSection.classList.add('hidden');
+  }
+  function showFFTTab() {
+    if (!vizSection || !spectrumSection) return;
+    tabFFT?.classList.add('active');
+    tabTime?.classList.remove('active');
+    vizSection.classList.add('hidden');
+    spectrumSection.classList.remove('hidden');
+    recalcFFTAndDraw();
+  }
+  tabTime?.addEventListener('click', showTimeTab);
+  tabFFT?.addEventListener('click', showFFTTab);
+  recalcFFTBtn?.addEventListener('click', recalcFFTAndDraw);
+  fftSizeEl?.addEventListener('change', recalcFFTAndDraw);
+  windowTypeEl?.addEventListener('change', recalcFFTAndDraw);
+  fftLogEl?.addEventListener('change', recalcFFTAndDraw);
+  peakCountEl?.addEventListener('input', recalcFFTAndDraw);
 
   // События масштабирования окна
   function syncViewLen(valMs) {
