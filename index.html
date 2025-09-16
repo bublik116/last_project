@@ -1,0 +1,72 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Синтез и сумма сигналов (аудио)</title>
+  <link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+  <header>
+    <h1>Сумматор сигналов (20 Гц – 20 кГц)</h1>
+    <p class="subtitle">Интерактивный синтез аудио-сигналов и их сумма. WebAudio + Canvas, без бэкенда.</p>
+  </header>
+
+  <section class="controls">
+    <div class="control-group">
+      <label for="sampleRate">Частота дискретизации (Fs):</label>
+      <select id="sampleRate">
+        <option value="44100" selected>44100 Гц</option>
+        <option value="48000">48000 Гц</option>
+      </select>
+    </div>
+    <div class="control-group">
+      <label for="durationSec">Длительность окна (с):</label>
+      <input id="durationSec" type="number" min="0.1" step="0.1" value="2.0" />
+    </div>
+    <div class="control-group">
+      <label for="normalize">Нормализация уровня:</label>
+      <input id="normalize" type="checkbox" checked />
+    </div>
+    <div class="control-group">
+      <button id="renderBtn">Рассчитать</button>
+      <button id="playBtn">Воспроизвести</button>
+      <button id="stopBtn" disabled>Стоп</button>
+      <button id="exportWavBtn">Экспорт WAV</button>
+      <button id="exportCsvBtn">Экспорт CSV</button>
+    </div>
+  </section>
+
+  <section class="sources">
+    <h2>Источники сигналов (до 10)</h2>
+    <div id="sourcesContainer"></div>
+    <div class="control-group">
+      <button id="addSourceBtn">Добавить источник</button>
+      <button id="clearSourcesBtn">Очистить все</button>
+    </div>
+  </section>
+
+  <section class="viz">
+    <h2>Временная область</h2>
+    <div class="control-group">
+      <label for="viewLenMsRange">Масштаб окна (мс):</label>
+      <input id="viewLenMsRange" type="range" min="5" max="2000" step="1" value="200" />
+      <input id="viewLenMsNumber" type="number" min="5" max="2000" step="1" value="200" />
+      <button id="fitAllBtn">Весь сигнал</button>
+    </div>
+    <div class="control-group">
+      <label for="viewOffsetMsRange">Смещение окна (мс):</label>
+      <input id="viewOffsetMsRange" type="range" min="0" max="0" step="1" value="0" />
+      <input id="viewOffsetMsNumber" type="number" min="0" max="0" step="1" value="0" />
+    </div>
+    <canvas id="waveCanvas" width="1000" height="240"></canvas>
+    <div id="warnings" class="warnings"></div>
+  </section>
+
+  <footer>
+    <small>Подсказка: для корректного старта аудио необходимо взаимодействие пользователя (кнопка «Воспроизвести»).</small>
+  </footer>
+
+  <script defer src="app.js"></script>
+</body>
+</html>

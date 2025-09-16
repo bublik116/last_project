@@ -1,0 +1,133 @@
+/*
+  Стили для простого интерфейса сумматора сигналов.
+  Акцент: читаемость и компактность без фреймворков.
+*/
+
+:root {
+  --bg: #0d1117;
+  --panel: #161b22;
+  --text: #c9d1d9;
+  --muted: #8b949e;
+  --accent: #58a6ff;
+  --warn: #ffa657;
+  --danger: #f85149;
+  --ok: #3fb950;
+}
+
+* { box-sizing: border-box; }
+
+body {
+  margin: 0;
+  font-family: system-ui, -apple-system, Segoe UI, Roboto, Ubuntu, Cantarell, Noto Sans, Helvetica, Arial, "Apple Color Emoji", "Segoe UI Emoji";
+  background: var(--bg);
+  color: var(--text);
+}
+
+header {
+  padding: 16px 20px;
+  background: var(--panel);
+  border-bottom: 1px solid #30363d;
+}
+
+h1 {
+  margin: 0 0 6px;
+  font-size: 20px;
+}
+
+.subtitle { color: var(--muted); margin: 0; }
+
+section { padding: 16px 20px; }
+
+.controls, .sources, .viz {
+  border-bottom: 1px solid #30363d;
+}
+
+.control-group {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  margin: 6px 12px 6px 0;
+}
+
+label { color: var(--muted); }
+
+input[type="number"], select, input[type="text"] {
+  background: #0b0f14;
+  color: var(--text);
+  border: 1px solid #30363d;
+  border-radius: 6px;
+  padding: 6px 8px;
+}
+
+button {
+  background: #21262d;
+  color: var(--text);
+  border: 1px solid #30363d;
+  border-radius: 6px;
+  padding: 6px 10px;
+  cursor: pointer;
+}
+
+button:hover { border-color: var(--accent); }
+button:disabled { opacity: 0.6; cursor: not-allowed; }
+
+/* Карточка источника */
+.source-card {
+  background: var(--panel);
+  border: 1px solid #30363d;
+  border-radius: 8px;
+  padding: 10px;
+  margin: 8px 0;
+}
+
+.source-row {
+  display: grid;
+  grid-template-columns: repeat(8, minmax(80px, 1fr));
+  gap: 8px;
+}
+
+.source-actions { display: flex; gap: 8px; align-items: center; }
+
+.badge { font-size: 12px; color: var(--muted); }
+
+/* Полотно графика */
+#waveCanvas {
+  width: 100%;
+  max-width: 1100px;
+  height: 240px;
+  background: #0b0f14;
+  border: 1px solid #30363d;
+  border-radius: 8px;
+}
+
+.warnings { margin-top: 8px; color: var(--warn); }
+.warn { color: var(--warn); }
+.danger { color: var(--danger); }
+.ok { color: var(--ok); }
+
+/* Бегунки (range) */
+input[type="range"] {
+  width: 100%;
+  appearance: none;
+  height: 6px;
+  border-radius: 4px;
+  background: #21262d;
+  outline: none;
+}
+input[type="range"]::-webkit-slider-thumb {
+  appearance: none;
+  width: 14px;
+  height: 14px;
+  border-radius: 50%;
+  background: var(--accent);
+  border: 1px solid #30363d;
+  cursor: pointer;
+}
+input[type="range"]::-moz-range-thumb {
+  width: 14px;
+  height: 14px;
+  border-radius: 50%;
+  background: var(--accent);
+  border: 1px solid #30363d;
+  cursor: pointer;
+}
