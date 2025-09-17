@@ -83,6 +83,49 @@
   /** @type {HTMLDivElement} */
   const fftInfo = document.getElementById('fftInfo');
 
+  // Элементы раздела «Речь (форманты)»
+  /** @type {HTMLButtonElement} */
+  const tabSpeech = document.getElementById('tabSpeech');
+  /** @type {HTMLElement} */
+  const speechSection = document.querySelector('section.speech');
+  /** @type {HTMLSelectElement} */
+  const vowelPresetEl = document.getElementById('vowelPreset');
+  /** @type {HTMLSelectElement} */
+  const genderEl = document.getElementById('gender');
+  /** @type {HTMLInputElement} */
+  const f0RangeEl = document.getElementById('f0Range');
+  /** @type {HTMLInputElement} */
+  const f0NumberEl = document.getElementById('f0Number');
+  /** @type {HTMLInputElement} */
+  const durSpeechEl = document.getElementById('durSpeech');
+  /** @type {HTMLInputElement} */
+  const voicedLevelEl = document.getElementById('voicedLevel');
+  /** @type {HTMLInputElement} */
+  const noiseLevelEl = document.getElementById('noiseLevel');
+  /** @type {HTMLInputElement} */
+  const F1El = document.getElementById('F1');
+  /** @type {HTMLInputElement} */
+  const B1El = document.getElementById('B1');
+  /** @type {HTMLInputElement} */
+  const F2El = document.getElementById('F2');
+  /** @type {HTMLInputElement} */
+  const B2El = document.getElementById('B2');
+  /** @type {HTMLInputElement} */
+  const F3El = document.getElementById('F3');
+  /** @type {HTMLInputElement} */
+  const B3El = document.getElementById('B3');
+  /** @type {HTMLButtonElement} */
+  const synthSpeechBtn = document.getElementById('synthSpeechBtn');
+  /** @type {HTMLButtonElement} */
+  const playSpeechBtn = document.getElementById('playSpeechBtn');
+  /** @type {HTMLButtonElement} */
+  const exportSpeechBtn = document.getElementById('exportSpeechBtn');
+  /** @type {HTMLCanvasElement} */
+  const speechCanvas = document.getElementById('speechCanvas');
+  const speechCtx = speechCanvas ? speechCanvas.getContext('2d') : null;
+  /** @type {HTMLDivElement} */
+  const speechInfo = document.getElementById('speechInfo');
+
   // Текущее собранное аудио (последний рассчитанный буфер)
   let lastBuffer = null; // Float32Array
   let lastComputed = null; // объект с метаданными расчёта
@@ -92,6 +135,9 @@
   let audioCtx = null;
   /** @type {AudioBufferSourceNode|null} */
   let currentSourceNode = null;
+  // Буфер речи
+  let speechBuffer = null; // Float32Array
+  let speechMeta = null;   // { Fs, N, T }
 
   // Типы сигналов и их «особый» параметр (duty/τ/f1)
   const TYPES = [
@@ -128,6 +174,34 @@
 
   function getFs() {
     return parseInt(sampleRateEl.value, 10) || 44100;
+  }
+
+  // Универсальная отрисовка массива на указанный канвас
+  function drawOnCanvas(targetCanvas, targetCtx, arr) {
+    if (!targetCanvas || !targetCtx || !arr) return;
+    const W = targetCanvas.width;
+    const H = targetCanvas.height;
+    targetCtx.clearRect(0, 0, W, H);
+    targetCtx.fillStyle = '#0b0f14';
+    targetCtx.fillRect(0, 0, W, H);
+    const midY = H / 2;
+    targetCtx.strokeStyle = '#30363d';
+    targetCtx.lineWidth = 1;
+    targetCtx.beginPath();
+    targetCtx.moveTo(0, midY);
+    targetCtx.lineTo(W, midY);
+    targetCtx.stroke();
+    targetCtx.strokeStyle = '#58a6ff';
+    targetCtx.lineWidth = 1.5;
+    targetCtx.beginPath();
+    const N = arr.length;
+    const xStep = W / (N - 1);
+    for (let i = 0; i < N; i++) {
+      const x = i * xStep;
+      const y = midY - (arr[i] * (H * 0.45));
+      if (i === 0) targetCtx.moveTo(x, y); else targetCtx.lineTo(x, y);
+    }
+    targetCtx.stroke();
   }
   function getDuration() {
     return Math.max(0.1, parseFloat(durationSecEl.value) || 1.0);
@@ -938,17 +1012,208 @@
     if (!vizSection || !spectrumSection) return;
     tabFFT?.classList.add('active');
     tabTime?.classList.remove('active');
+    tabSpeech?.classList.remove('active');
     vizSection.classList.add('hidden');
     spectrumSection.classList.remove('hidden');
     recalcFFTAndDraw();
   }
   tabTime?.addEventListener('click', showTimeTab);
   tabFFT?.addEventListener('click', showFFTTab);
+  function showSpeechTab() {
+    if (!speechSection || !vizSection || !spectrumSection) return;
+    tabSpeech?.classList.add('active');
+    tabTime?.classList.remove('active');
+    tabFFT?.classList.remove('active');
+    vizSection.classList.add('hidden');
+    spectrumSection.classList.add('hidden');
+    speechSection.classList.remove('hidden');
+    // при первом входе обновим пресеты и отрисуем
+    applyVowelPreset();
+    synthSpeech();
+    drawSpeech();
+  }
+  tabSpeech?.addEventListener('click', showSpeechTab);
   recalcFFTBtn?.addEventListener('click', recalcFFTAndDraw);
   fftSizeEl?.addEventListener('change', recalcFFTAndDraw);
   windowTypeEl?.addEventListener('change', recalcFFTAndDraw);
   fftLogEl?.addEventListener('change', recalcFFTAndDraw);
   peakCountEl?.addEventListener('input', recalcFFTAndDraw);
+
+  // ===== Формантный синтез речи =====
+  const VOWEL_PRESETS = {
+    // Набор базовых значений (мужской голос). Для женского применим масштаб 1.2 по частоте формант.
+    a: { F1: 730, B1: 80,  F2: 1090, B2: 90,  F3: 2440, B3: 120 },
+    e: { F1: 530, B1: 70,  F2: 1840, B2: 100, F3: 2480, B3: 120 },
+    i: { F1: 270, B1: 60,  F2: 2290, B2: 100, F3: 3010, B3: 120 },
+    o: { F1: 570, B1: 80,  F2: 840,  B2: 90,  F3: 2410, B3: 120 },
+    u: { F1: 300, B1: 70,  F2: 870,  B2: 100, F3: 2240, B3: 120 },
+  };
+
+  function applyVowelPreset() {
+    if (!vowelPresetEl || !genderEl) return;
+    const p = VOWEL_PRESETS[vowelPresetEl.value] || VOWEL_PRESETS.a;
+    const scale = (genderEl.value === 'female') ? 1.2 : 1.0;
+    F1El.value = String(Math.round(p.F1 * scale));
+    B1El.value = String(p.B1);
+    F2El.value = String(Math.round(p.F2 * scale));
+    B2El.value = String(p.B2);
+    F3El.value = String(Math.round(p.F3 * scale));
+    B3El.value = String(p.B3);
+    // Предложим F0 типичный
+    if (f0RangeEl && f0NumberEl) {
+      const f0 = (genderEl.value === 'female') ? 200 : 120;
+      f0RangeEl.value = String(f0);
+      f0NumberEl.value = String(f0);
+    }
+  }
+
+  vowelPresetEl?.addEventListener('change', applyVowelPreset);
+  genderEl?.addEventListener('change', applyVowelPreset);
+  // Синхронизация F0 ползунок↔число
+  f0RangeEl?.addEventListener('input', () => { if (f0NumberEl) f0NumberEl.value = f0RangeEl.value; });
+  f0NumberEl?.addEventListener('input', () => { if (f0RangeEl) f0RangeEl.value = f0NumberEl.value; });
+
+  // Преобразование частоты и добротности в коэффициенты би-квадратного полосового фильтра (RBJ)
+  function biquadBandpassCoeffs(Fs, Fc, B) {
+    const Q = Math.max(0.1, Fc / Math.max(1e-6, B));
+    const w0 = 2 * Math.PI * (Fc / Fs);
+    const cw = Math.cos(w0);
+    const sw = Math.sin(w0);
+    const alpha = sw / (2 * Q);
+    const b0 = alpha;
+    const b1 = 0;
+    const b2 = -alpha;
+    const a0 = 1 + alpha;
+    const a1 = -2 * cw;
+    const a2 = 1 - alpha;
+    return { b0, b1, b2, a0, a1, a2 };
+  }
+
+  function processBiquad(x, coeffs) {
+    const y = new Float32Array(x.length);
+    let z1 = 0, z2 = 0; // Direct Form I implementation (transposed would be better but fine)
+    const { b0, b1, b2, a0, a1, a2 } = coeffs;
+    for (let n = 0; n < x.length; n++) {
+      const xn = x[n];
+      const yn = (b0 * xn + z1) / a0;
+      z1 = b1 * xn + z2 - a1 * yn;
+      z2 = b2 * xn - a2 * yn;
+      y[n] = yn;
+    }
+    return y;
+  }
+
+  function synthSpeech() {
+    const Fs = getFs();
+    const T = Math.max(0.2, parseFloat(durSpeechEl?.value || '1.0'));
+    const N = Math.floor(Fs * T);
+    const f0 = clamp(parseFloat(f0NumberEl?.value || f0RangeEl?.value || '120'), 40, 400);
+    const voicedLvl = clamp(parseFloat(voicedLevelEl?.value || '1'), 0, 1);
+    const noiseLvl = clamp(parseFloat(noiseLevelEl?.value || '0'), 0, 1);
+    const F1 = clamp(parseFloat(F1El?.value || '730'), 50, 6000);
+    const B1 = clamp(parseFloat(B1El?.value || '80'), 10, 1000);
+    const F2 = clamp(parseFloat(F2El?.value || '1090'), 50, 6000);
+    const B2 = clamp(parseFloat(B2El?.value || '90'), 10, 1000);
+    const F3 = clamp(parseFloat(F3El?.value || '2440'), 50, 8000);
+    const B3 = clamp(parseFloat(B3El?.value || '120'), 10, 1200);
+
+    // Источник: импульсный поезд на F0 + белый шум
+    const x = new Float32Array(N);
+    let phase = 0;
+    const dphi = f0 / Fs;
+    for (let n = 0; n < N; n++) {
+      phase += dphi;
+      let voiced = 0;
+      if (phase >= 1.0) { phase -= 1.0; voiced = 1.0; } // узкий импульс
+      const noise = (Math.random() * 2 - 1);
+      x[n] = voicedLvl * voiced + noiseLvl * noise * 0.3; // шум приглушим
+    }
+
+    // Фильтры формант
+    const c1 = biquadBandpassCoeffs(Fs, F1, B1);
+    const c2 = biquadBandpassCoeffs(Fs, F2, B2);
+    const c3 = biquadBandpassCoeffs(Fs, F3, B3);
+    const y1 = processBiquad(x, c1);
+    const y2 = processBiquad(x, c2);
+    const y3 = processBiquad(x, c3);
+    const y = new Float32Array(N);
+    for (let n = 0; n < N; n++) y[n] = y1[n] + y2[n] + y3[n];
+
+    // Нормализация, чтобы избежать клиппинга
+    let maxAbs = 0; for (let n = 0; n < N; n++) maxAbs = Math.max(maxAbs, Math.abs(y[n]));
+    if (maxAbs > 0.99) { const k = 0.99 / maxAbs; for (let n = 0; n < N; n++) y[n] *= k; }
+
+    speechBuffer = y;
+    speechMeta = { Fs, N, T, f0, F1, F2, F3 };
+  }
+
+  function drawSpeech() {
+    if (!speechBuffer) return;
+    drawOnCanvas(speechCanvas, speechCtx, speechBuffer);
+    if (speechInfo && speechMeta) speechInfo.textContent = `Fs=${speechMeta.Fs} Гц, T=${speechMeta.T.toFixed(2)} с, F0≈${Math.round(speechMeta.f0)} Гц`;
+  }
+
+  function playSpeech() {
+    if (!speechBuffer) synthSpeech();
+    if (!speechBuffer || !speechMeta) return;
+    const ctx = ensureAudioCtx();
+    const audioBuf = ctx.createBuffer(1, speechBuffer.length, speechMeta.Fs);
+    audioBuf.copyToChannel(speechBuffer, 0);
+    stopPlayback();
+    const node = ctx.createBufferSource();
+    node.buffer = audioBuf;
+    node.connect(ctx.destination);
+    node.start();
+    currentSourceNode = node;
+    stopBtn.disabled = false;
+    node.onended = () => { stopPlayback(); };
+  }
+
+  function exportSpeechWav() {
+    if (!speechBuffer) synthSpeech();
+    if (!speechBuffer || !speechMeta) return;
+    exportWavGeneric(speechBuffer, 'speech_formant.wav', speechMeta.Fs);
+  }
+
+  // Общая функция экспорта WAV для произвольного буфера
+  function exportWavGeneric(buffer, filename, Fs) {
+    const ch = 1;
+    const N = buffer.length;
+    const bytesPerSample = 2;
+    const blockAlign = ch * bytesPerSample;
+    const byteRate = Fs * blockAlign;
+    const dataSize = N * blockAlign;
+    const headerSize = 44;
+    const buf = new ArrayBuffer(headerSize + dataSize);
+    const view = new DataView(buf);
+    writeStr(view, 0, 'RIFF');
+    view.setUint32(4, 36 + dataSize, true);
+    writeStr(view, 8, 'WAVE');
+    writeStr(view, 12, 'fmt ');
+    view.setUint32(16, 16, true);
+    view.setUint16(20, 1, true);
+    view.setUint16(22, ch, true);
+    view.setUint32(24, Fs, true);
+    view.setUint32(28, byteRate, true);
+    view.setUint16(32, blockAlign, true);
+    view.setUint16(34, 16, true);
+    writeStr(view, 36, 'data');
+    view.setUint32(40, dataSize, true);
+    let offset = 44;
+    for (let i = 0; i < N; i++) {
+      let s = clamp(buffer[i], -1, 1);
+      s = s < 0 ? s * 0x8000 : s * 0x7FFF;
+      view.setInt16(offset, s, true);
+      offset += 2;
+    }
+    const blob = new Blob([view], { type: 'audio/wav' });
+    downloadBlob(blob, filename);
+    function writeStr(dv, pos, str) { for (let i = 0; i < str.length; i++) dv.setUint8(pos + i, str.charCodeAt(i)); }
+  }
+
+  synthSpeechBtn?.addEventListener('click', () => { synthSpeech(); drawSpeech(); });
+  playSpeechBtn?.addEventListener('click', () => { playSpeech(); });
+  exportSpeechBtn?.addEventListener('click', () => { exportSpeechWav(); });
 
   // События масштабирования окна
   function syncViewLen(valMs) {
@@ -1008,4 +1273,6 @@
   addDefaultSource('sine'); // базовый 440 Гц
   renderSources();
   recalcAndDraw();
+  // Инициализируем пресет речи по умолчанию
+  applyVowelPreset();
 })();
