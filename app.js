@@ -127,6 +127,17 @@
   const speechCtx = speechCanvas ? speechCanvas.getContext('2d') : null;
   /** @type {HTMLDivElement} */
   const speechInfo = document.getElementById('speechInfo');
+  // Речь: переключатель вида и параметры спектра на том же канвасе
+  /** @type {HTMLSelectElement} */
+  const speechViewModeEl = document.getElementById('speechViewMode');
+  /** @type {HTMLInputElement} */
+  const speechSpecLogEl = document.getElementById('speechSpecLog');
+  /** @type {HTMLButtonElement} */
+  const speechSpecResetZoomBtn = document.getElementById('speechSpecResetZoomBtn');
+  /** @type {HTMLInputElement} */
+  const speechSpecLogXEl = document.getElementById('speechSpecLogX');
+  /** @type {HTMLInputElement} */
+  const speechSpecHarmEl = document.getElementById('speechSpecHarm');
   /** @type {HTMLInputElement} */
   const ttsTextEl = document.getElementById('ttsText');
   /** @type {HTMLButtonElement} */
@@ -175,6 +186,15 @@
   let isFftPanning = false;
   let fftPanStartX = 0;
 
+  // Состояние спектра речи (для зума/панорамы)
+  let speechLastFFT = null; // { mags, freqs, Nfft, Fs }
+  let speechPeaks = [];
+  let speechFmin = 0;
+  let speechFmax = 0;
+  let speechCursorFreq = null;
+  let isSpeechPanning = false;
+  let speechPanStartX = 0;
+
   // Типы сигналов и их «особый» параметр (duty/τ/f1)
   const TYPES = [
     { id: 'sine', name: 'Синус' },
@@ -210,6 +230,112 @@
 
   function getFs() {
     return parseInt(sampleRateEl.value, 10) || 44100;
+  }
+  // ===== Обработчики мыши для зума/панорамы спектра речи (на общем канвасе) =====
+  if (speechCanvas) {
+    speechCanvas.addEventListener('wheel', (e) => {
+      if ((speechViewModeEl?.value || 'wave') !== 'spec') return;
+      if (!speechLastFFT) return;
+      e.preventDefault();
+      const rect = speechCanvas.getBoundingClientRect();
+      const x = e.clientX - rect.left;
+      const W = rect.width;
+      const logX = !!speechSpecLogXEl?.checked;
+      const fullMin = 0, fullMax = speechLastFFT.Fs / 2;
+      const fMin = speechFmin;
+      const fMax = speechFmax;
+      const epsF = 1;
+      const fMinEff = logX ? Math.max(fMin, epsF) : fMin;
+      const spanLin = fMax - fMinEff;
+      const Lmin = Math.log(fMinEff + 1e-12), Lmax = Math.log(fMax + 1e-12);
+      const fUnder = logX ? Math.exp(Lmin + (x / W) * (Lmax - Lmin)) : (fMinEff + (x / W) * spanLin);
+      const delta = Math.sign(e.deltaY);
+      const factor = delta > 0 ? 1.1 : 0.9;
+      const Fs = speechLastFFT.Fs;
+      const minSpan = Math.max(Fs / speechLastFFT.Nfft, 5);
+      if (logX) {
+        // зум в лог-домене
+        const Lspan = Lmax - Lmin;
+        const minLspan = Math.log((fMinEff + minSpan) / (fMinEff + 1e-12));
+        const maxLspan = Math.log((fullMax) / Math.max(epsF, 1));
+        let newLspan = clamp(Lspan * factor, Math.max(minLspan, 0.01), maxLspan);
+        let Lcenter = Math.log(fUnder + 1e-12);
+        let newLmin = Lcenter - (x / W) * newLspan;
+        let newLmax = newLmin + newLspan;
+        let newMin = Math.max(epsF, Math.exp(newLmin));
+        let newMax = Math.exp(newLmax);
+        if (newMin < fullMin) { newMin = epsF; }
+        if (newMax > fullMax) { newMax = fullMax; }
+        speechFmin = newMin;
+        speechFmax = newMax;
+      } else {
+        const maxSpan = Fs / 2;
+        let newSpan = clamp(spanLin * factor, minSpan, maxSpan);
+        let newMin = fUnder - (x / W) * newSpan;
+        let newMax = newMin + newSpan;
+        if (newMin < fullMin) { newMin = fullMin; newMax = newMin + newSpan; }
+        if (newMax > fullMax) { newMax = fullMax; newMin = newMax - newSpan; }
+        speechFmin = newMin;
+        speechFmax = newMax;
+      }
+      speechCursorFreq = fUnder;
+      drawSpeechSpectrum(speechLastFFT.mags, speechLastFFT.freqs, speechPeaks);
+      updateSpeechFftInfo();
+    }, { passive: false });
+
+    speechCanvas.addEventListener('mousedown', (e) => {
+      if ((speechViewModeEl?.value || 'wave') !== 'spec') return;
+      isSpeechPanning = true;
+      speechPanStartX = e.clientX;
+    });
+    window.addEventListener('mouseup', () => { isSpeechPanning = false; });
+    window.addEventListener('mousemove', (e) => {
+      if ((speechViewModeEl?.value || 'wave') !== 'spec') return;
+      if (!speechLastFFT) return;
+      const rect = speechCanvas.getBoundingClientRect();
+      const x = e.clientX - rect.left;
+      const W = rect.width;
+      const logX = !!speechSpecLogXEl?.checked;
+      const epsF = 1;
+      const fMinEff = logX ? Math.max(speechFmin, epsF) : speechFmin;
+      const spanLin = (speechFmax - fMinEff) || (speechLastFFT.Fs / 2);
+      const Lmin = Math.log(fMinEff + 1e-12), Lmax = Math.log(speechFmax + 1e-12);
+      const fUnder = logX ? Math.exp(Lmin + (clamp(x, 0, W) / W) * (Lmax - Lmin)) : (fMinEff + (clamp(x, 0, W) / W) * spanLin);
+      speechCursorFreq = clamp(fUnder, 0, speechLastFFT.Fs / 2);
+      if (isSpeechPanning) {
+        const dx = e.clientX - speechPanStartX;
+        speechPanStartX = e.clientX;
+        const fullMin = 0, fullMax = speechLastFFT.Fs / 2;
+        const minSpan = Math.max(speechLastFFT.Fs / speechLastFFT.Nfft, 5);
+        if (logX) {
+          const Lspan = Lmax - Lmin;
+          const pxToL = Lspan / W;
+          let newLmin = Lmin - dx * pxToL;
+          let newLmax = Lmax - dx * pxToL;
+          let newMin = Math.max(epsF, Math.exp(newLmin));
+          let newMax = Math.exp(newLmax);
+          // границы
+          if (newMin < fullMin) newMin = epsF;
+          if (newMax > fullMax) newMax = fullMax;
+          // защита от слишком узкого окна в лин домене
+          if (newMax - newMin < minSpan) newMax = newMin + minSpan;
+          speechFmin = newMin;
+          speechFmax = newMax;
+        } else {
+          const hzPerPx = spanLin / W;
+          let newMin = speechFmin - dx * hzPerPx;
+          let newMax = speechFmax - dx * hzPerPx;
+          const curSpan = newMax - newMin;
+          if (newMin < fullMin) { newMin = fullMin; newMax = newMin + curSpan; }
+          if (newMax > fullMax) { newMax = fullMax; newMin = newMax - curSpan; }
+          if (curSpan < minSpan) { newMax = newMin + minSpan; }
+          speechFmin = newMin;
+          speechFmax = newMax;
+        }
+      }
+      drawSpeechSpectrum(speechLastFFT.mags, speechLastFFT.freqs, speechPeaks);
+      updateSpeechFftInfo();
+    });
   }
 
   // Универсальная отрисовка массива на указанный канвас
@@ -733,6 +859,227 @@
     node.onended = () => { stopPlayback(); };
   }
 
+  // ===== Спектр речи (FFT) =====
+  function isSpeechFftLog() { return !!speechSpecLogEl?.checked; }
+
+  function computeSpeechFFT() {
+    if (!speechBuffer || !speechMeta) synthSpeech();
+    if (!speechBuffer || !speechMeta) return null;
+    const Fs = speechMeta.Fs || getFs();
+    const Nfft = getFFTSize();
+    const re = new Float32Array(Nfft);
+    const im = new Float32Array(Nfft);
+    const w = makeWindow(Nfft, getWindowType());
+    for (let n = 0; n < Nfft; n++) {
+      const i = n;
+      const s = (i < speechBuffer.length) ? speechBuffer[i] : 0;
+      re[n] = s * w[n];
+      im[n] = 0;
+    }
+    fftRadix2(re, im);
+    const bins = (Nfft >> 1) + 1;
+    const mags = new Float32Array(bins);
+    const freqs = new Float32Array(bins);
+    const scaleDC = 1 / Nfft;
+    const scale = 2 / Nfft;
+    for (let k = 0; k < bins; k++) {
+      const m = Math.hypot(re[k], im[k]);
+      const s = (k === 0 || (Nfft % 2 === 0 && k === Nfft / 2)) ? scaleDC : scale;
+      mags[k] = m * s;
+      freqs[k] = (k * Fs) / Nfft;
+    }
+    return { Fs, Nfft, mags, freqs };
+  }
+
+  function drawSpeechSpectrum(mags, freqs, peaks) {
+    if (!speechCtx || !speechCanvas) return;
+    const W = speechCanvas.width;
+    const H = speechCanvas.height;
+    speechCtx.clearRect(0, 0, W, H);
+    speechCtx.fillStyle = '#0b0f14';
+    speechCtx.fillRect(0, 0, W, H);
+    // ось X
+    speechCtx.strokeStyle = '#30363d';
+    speechCtx.lineWidth = 1;
+    speechCtx.beginPath();
+    speechCtx.moveTo(0, H - 20);
+    speechCtx.lineTo(W, H - 20);
+    speechCtx.stroke();
+
+    const Fs = speechLastFFT?.Fs || (speechMeta?.Fs || getFs());
+    const fullFmax = Fs / 2;
+    const fMin = clamp(speechFmin, 0, fullFmax);
+    const fMax = clamp(speechFmax || fullFmax, fMin + 1e-6, fullFmax);
+    const logX = !!speechSpecLogXEl?.checked;
+    const epsF = 1; // 1 Гц минимум для лог-оси
+    const fMinEff = logX ? Math.max(fMin, epsF) : fMin;
+    const span = fMax - fMinEff;
+    const Lmin = Math.log(fMinEff + 1e-12), Lmax = Math.log(fMax + 1e-12);
+    const xOfF = (f) => {
+      const ff = Math.max(f, fMinEff);
+      if (!logX) return ((ff - fMinEff) / span) * W;
+      const L = Math.log(ff + 1e-12);
+      return ((L - Lmin) / (Lmax - Lmin)) * W;
+    };
+
+    const useDb = isSpeechFftLog();
+    if (useDb) {
+      const eps = 1e-12;
+      let maxDb = -Infinity, minDb = Infinity;
+      for (let i = 0; i < mags.length; i++) {
+        const db = 20 * Math.log10(mags[i] + eps);
+        if (db > maxDb) maxDb = db;
+        if (db < minDb) minDb = db;
+      }
+      const top = Math.max(-10, maxDb);
+      const bottom = Math.min(-120, minDb);
+      const yOf = (db) => {
+        const t = (db - bottom) / (top - bottom + 1e-9);
+        return (1 - t) * (H - 30) + 10;
+      };
+      speechCtx.strokeStyle = '#58a6ff';
+      speechCtx.lineWidth = 1.5;
+      speechCtx.beginPath();
+      let started = false;
+      for (let i = 0; i < mags.length; i++) {
+        const f = freqs[i]; if (f < fMin || f > fMax) continue;
+        const x = xOfF(f);
+        const y = yOf(20 * Math.log10(mags[i] + eps));
+        if (!started) { speechCtx.moveTo(x, y); started = true; }
+        else speechCtx.lineTo(x, y);
+      }
+      if (started) speechCtx.stroke();
+      // Пики
+      speechCtx.fillStyle = '#ffa657';
+      speechCtx.strokeStyle = '#ffa657';
+      for (const p of peaks) {
+        if (p.freq < fMin || p.freq > fMax) continue;
+        const x = xOfF(p.freq);
+        const y = yOf(20 * Math.log10(p.mag + eps));
+        speechCtx.beginPath();
+        speechCtx.moveTo(x, H - 20);
+        speechCtx.lineTo(x, y);
+        speechCtx.stroke();
+        speechCtx.fillText(`${Math.round(p.freq)} Гц`, x + 4, y - 4);
+      }
+    } else {
+      // линейный масштаб
+      let vmax = 1e-9; for (let i = 0; i < mags.length; i++) if (mags[i] > vmax) vmax = mags[i];
+      const yOf = (v) => { const t = v / (vmax + 1e-9); return (1 - t) * (H - 30) + 10; };
+      speechCtx.strokeStyle = '#58a6ff';
+      speechCtx.lineWidth = 1.5;
+      speechCtx.beginPath();
+      let started = false;
+      for (let i = 0; i < mags.length; i++) {
+        const f = freqs[i]; if (f < fMin || f > fMax) continue;
+        const x = xOfF(f);
+        const y = yOf(mags[i]);
+        if (!started) { speechCtx.moveTo(x, y); started = true; }
+        else speechCtx.lineTo(x, y);
+      }
+      if (started) speechCtx.stroke();
+      // Пики
+      speechCtx.fillStyle = '#ffa657';
+      speechCtx.strokeStyle = '#ffa657';
+      for (const p of peaks) {
+        if (p.freq < fMin || p.freq > fMax) continue;
+        const x = xOfF(p.freq);
+        const y = yOf(p.mag);
+        speechCtx.beginPath();
+        speechCtx.moveTo(x, H - 20);
+        speechCtx.lineTo(x, y);
+        speechCtx.stroke();
+        speechCtx.fillText(`${Math.round(p.freq)} Гц`, x + 4, y - 4);
+      }
+    }
+    // Курсор
+    if (speechCursorFreq != null && speechCursorFreq >= fMin && speechCursorFreq <= fMax) {
+      const x = xOfF(speechCursorFreq);
+      speechCtx.strokeStyle = '#6e7681';
+      speechCtx.setLineDash([4, 4]);
+      speechCtx.beginPath();
+      speechCtx.moveTo(x, 0);
+      speechCtx.lineTo(x, H - 20);
+      speechCtx.stroke();
+      speechCtx.setLineDash([]);
+    }
+    // Гармоники F0
+    const showHarm = speechSpecHarmEl ? !!speechSpecHarmEl.checked : true;
+    if (showHarm && speechMeta?.f0) {
+      const f0 = speechMeta.f0;
+      speechCtx.strokeStyle = '#444c56';
+      speechCtx.setLineDash([6, 4]);
+      for (let k = 1; k * f0 <= fMax; k++) {
+        const fk = k * f0; if (fk < fMinEff) continue;
+        const x = xOfF(fk);
+        speechCtx.beginPath();
+        speechCtx.moveTo(x, 0);
+        speechCtx.lineTo(x, H - 20);
+        speechCtx.stroke();
+      }
+      speechCtx.setLineDash([]);
+    }
+  }
+
+  function updateSpeechFftInfo() {
+    if (!speechInfo || !speechLastFFT) return;
+    const { Nfft, Fs } = speechLastFFT;
+    const df = Fs / Nfft;
+    let cursorText = '';
+    if (speechCursorFreq != null) {
+      const i = speechNearestBinIndex(speechCursorFreq);
+      if (i >= 0) {
+        const useDb = isSpeechFftLog();
+        const mag = speechLastFFT.mags[i];
+        const val = useDb ? (20 * Math.log10(mag + 1e-12)) : mag;
+        cursorText = ` | курсор: f≈${speechCursorFreq.toFixed(1)} Гц, ${useDb ? 'дБ' : 'A'}≈${useDb ? val.toFixed(1) : val.toFixed(3)}`;
+      }
+    }
+    const base = baseSpeechInfoText();
+    const logXtxt = speechSpecLogXEl?.checked ? ', ось f=лог' : '';
+    speechInfo.textContent = `${base} | спектр: N=${Nfft}, Δf≈${df.toFixed(2)} Гц, окно: [${Math.round(speechFmin)}..${Math.round(speechFmax)}] Гц${logXtxt}${cursorText}`;
+  }
+
+  function speechNearestBinIndex(freq) {
+    if (!speechLastFFT) return -1;
+    const { freqs } = speechLastFFT;
+    let lo = 0, hi = freqs.length - 1;
+    while (lo <= hi) {
+      const mid = (lo + hi) >> 1;
+      if (freqs[mid] < freq) lo = mid + 1; else hi = mid - 1;
+    }
+    const i1 = clamp(lo, 0, freqs.length - 1);
+    const i0 = Math.max(0, i1 - 1);
+    return (Math.abs(freqs[i0] - freq) <= Math.abs(freqs[i1] - freq)) ? i0 : i1;
+  }
+
+  function recalcSpeechFFTAndDraw() {
+    if (!speechCanvas) return;
+    const mode = speechViewModeEl?.value || 'wave';
+    if (mode !== 'spec') { // в режиме осциллограммы — просто перерисуем волну/инфо
+      if (speechBuffer) {
+        drawOnCanvas(speechCanvas, speechCtx, speechBuffer);
+        if (speechInfo && speechMeta) speechInfo.textContent = baseSpeechInfoText();
+      }
+      return;
+    }
+    const res = computeSpeechFFT();
+    if (!res) return;
+    const { mags, freqs, Nfft, Fs } = res;
+    speechLastFFT = { mags, freqs, Nfft, Fs };
+    speechPeaks = findPeaks(mags, freqs, getPeakCount());
+    const fMaxFull = Fs / 2;
+    if (speechFmax <= 0 || speechFmax > fMaxFull || speechFmin < 0 || (speechFmax - speechFmin) < (Fs / Nfft)) {
+      speechFmin = 0;
+      speechFmax = fMaxFull;
+    } else {
+      speechFmin = clamp(speechFmin, 0, fMaxFull);
+      speechFmax = clamp(speechFmax, speechFmin + (Fs / Nfft), fMaxFull);
+    }
+    drawSpeechSpectrum(mags, freqs, speechPeaks);
+    updateSpeechFftInfo();
+  }
+
   // Экспорт WAV (PCM 16-bit LE)
   function exportWav() {
     if (!lastBuffer) recalcAndDraw();
@@ -1155,7 +1502,9 @@
     // при первом входе обновим пресеты и отрисуем
     applyVowelPreset();
     synthSpeech();
+    if (speechViewModeEl) speechViewModeEl.value = 'spec'; // по умолчанию показываем спектр
     drawSpeech();
+    recalcSpeechFFTAndDraw();
   }
   tabSpeech?.addEventListener('click', showSpeechTab);
   recalcFFTBtn?.addEventListener('click', recalcFFTAndDraw);
@@ -1205,15 +1554,15 @@
   f0RangeEl?.addEventListener('input', () => { if (f0NumberEl) f0NumberEl.value = f0RangeEl.value; });
   f0NumberEl?.addEventListener('input', () => { if (f0RangeEl) f0RangeEl.value = f0NumberEl.value; });
   // Морфинг и прочие параметры — пересчёт при изменении
-  morphAlphaEl?.addEventListener('input', () => { applyVowelMorph(); synthSpeech(); drawSpeech(); });
-  vowelPresetFromEl?.addEventListener('change', () => { applyVowelMorph(); synthSpeech(); drawSpeech(); });
-  vowelPresetToEl?.addEventListener('change', () => { applyVowelMorph(); synthSpeech(); drawSpeech(); });
-  glottalModelEl?.addEventListener('change', () => { synthSpeech(); drawSpeech(); });
-  OqEl?.addEventListener('input', () => { synthSpeech(); drawSpeech(); });
-  RqEl?.addEventListener('input', () => { synthSpeech(); drawSpeech(); });
-  preEmphEl?.addEventListener('change', () => { synthSpeech(); drawSpeech(); });
-  preEmphAEl?.addEventListener('input', () => { synthSpeech(); drawSpeech(); });
-  tractModelEl?.addEventListener('change', () => { synthSpeech(); drawSpeech(); });
+  morphAlphaEl?.addEventListener('input', () => { applyVowelMorph(); synthSpeech(); drawSpeech(); recalcSpeechFFTAndDraw(); });
+  vowelPresetFromEl?.addEventListener('change', () => { applyVowelMorph(); synthSpeech(); drawSpeech(); recalcSpeechFFTAndDraw(); });
+  vowelPresetToEl?.addEventListener('change', () => { applyVowelMorph(); synthSpeech(); drawSpeech(); recalcSpeechFFTAndDraw(); });
+  glottalModelEl?.addEventListener('change', () => { synthSpeech(); drawSpeech(); recalcSpeechFFTAndDraw(); });
+  OqEl?.addEventListener('input', () => { synthSpeech(); drawSpeech(); recalcSpeechFFTAndDraw(); });
+  RqEl?.addEventListener('input', () => { synthSpeech(); drawSpeech(); recalcSpeechFFTAndDraw(); });
+  preEmphEl?.addEventListener('change', () => { synthSpeech(); drawSpeech(); recalcSpeechFFTAndDraw(); });
+  preEmphAEl?.addEventListener('input', () => { synthSpeech(); drawSpeech(); recalcSpeechFFTAndDraw(); });
+  tractModelEl?.addEventListener('change', () => { synthSpeech(); drawSpeech(); recalcSpeechFFTAndDraw(); });
   demoVowelsBtn?.addEventListener('click', () => { playDemoVowels(); });
 
   // Преобразование частоты и добротности в коэффициенты би-квадратного полосового фильтра (RBJ)
@@ -1364,10 +1713,21 @@
     speechMeta = { Fs, N, T, f0, F1, F2, F3, model };
   }
 
+  function baseSpeechInfoText() {
+    if (!speechMeta) return '';
+    return `Fs=${speechMeta.Fs} Гц, T=${speechMeta.T.toFixed(2)} с, F0≈${Math.round(speechMeta.f0)} Гц`;
+  }
+
   function drawSpeech() {
-    if (!speechBuffer) return;
+    if (!speechBuffer || !speechCanvas || !speechCtx) return;
+    const mode = speechViewModeEl?.value || 'wave';
+    if (mode === 'spec') {
+      recalcSpeechFFTAndDraw();
+      return;
+    }
+    // Осциллограмма
     drawOnCanvas(speechCanvas, speechCtx, speechBuffer);
-    if (speechInfo && speechMeta) speechInfo.textContent = `Fs=${speechMeta.Fs} Гц, T=${speechMeta.T.toFixed(2)} с, F0≈${Math.round(speechMeta.f0)} Гц`;
+    if (speechInfo && speechMeta) speechInfo.textContent = baseSpeechInfoText();
   }
 
   function playSpeech() {
@@ -1429,9 +1789,21 @@
     function writeStr(dv, pos, str) { for (let i = 0; i < str.length; i++) dv.setUint8(pos + i, str.charCodeAt(i)); }
   }
 
-  synthSpeechBtn?.addEventListener('click', () => { synthSpeech(); drawSpeech(); });
+  synthSpeechBtn?.addEventListener('click', () => { synthSpeech(); drawSpeech(); recalcSpeechFFTAndDraw(); });
   playSpeechBtn?.addEventListener('click', () => { playSpeech(); });
   exportSpeechBtn?.addEventListener('click', () => { exportSpeechWav(); });
+  // Контролы спектра речи (новые элементы)
+  speechViewModeEl?.addEventListener('change', () => { drawSpeech(); });
+  speechSpecLogEl?.addEventListener('change', () => { recalcSpeechFFTAndDraw(); });
+  speechSpecLogXEl?.addEventListener('change', () => { recalcSpeechFFTAndDraw(); });
+  speechSpecHarmEl?.addEventListener('change', () => { if ((speechViewModeEl?.value || 'wave') === 'spec') drawSpeechSpectrum(speechLastFFT?.mags || new Float32Array(0), speechLastFFT?.freqs || new Float32Array(0), speechPeaks || []); });
+  speechSpecResetZoomBtn?.addEventListener('click', () => {
+    if (!speechLastFFT) return;
+    speechFmin = 0;
+    speechFmax = speechLastFFT.Fs / 2;
+    drawSpeechSpectrum(speechLastFFT.mags, speechLastFFT.freqs, speechPeaks);
+    updateSpeechFftInfo();
+  });
 
   // ===== Обработчики мыши для зума/панорамы спектра =====
   if (fftCanvas) {
@@ -1657,6 +2029,7 @@
     speechBuffer = y;
     speechMeta = { Fs, N: y.length, T: y.length / Fs, f0: baseF0 };
     drawSpeech();
+    recalcSpeechFFTAndDraw();
     playSpeech();
   }
 
@@ -1671,6 +2044,7 @@
         applyVowelPreset();
       }
       synthSpeech();
+      recalcSpeechFFTAndDraw();
       const ctx = ensureAudioCtx();
       const audioBuf = ctx.createBuffer(1, speechBuffer.length, speechMeta.Fs);
       audioBuf.copyToChannel(speechBuffer, 0);

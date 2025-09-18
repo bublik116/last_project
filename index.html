@@ -131,6 +131,20 @@
       <input id="ttsText" type="text" value="ма ма па па" style="min-width: 320px;" />
       <button id="ttsSpeakBtn">Озвучить текст</button>
     </div>
+    <div class="control-group">
+      <label for="speechViewMode">Вид:</label>
+      <select id="speechViewMode">
+        <option value="wave" selected>Осциллограмма</option>
+        <option value="spec">Спектр</option>
+      </select>
+      <label for="speechSpecLog">дБ</label>
+      <input id="speechSpecLog" type="checkbox" checked />
+      <label for="speechSpecLogX">лог f</label>
+      <input id="speechSpecLogX" type="checkbox" />
+      <label for="speechSpecHarm">гармоники F0</label>
+      <input id="speechSpecHarm" type="checkbox" checked />
+      <button id="speechSpecResetZoomBtn">Сброс зума</button>
+    </div>
     <canvas id="speechCanvas" width="1000" height="240"></canvas>
     <div id="speechInfo" class="badge"></div>
   </section>
