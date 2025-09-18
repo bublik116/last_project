@@ -82,6 +82,8 @@
   const fftCtx = fftCanvas ? fftCanvas.getContext('2d') : null;
   /** @type {HTMLDivElement} */
   const fftInfo = document.getElementById('fftInfo');
+  /** @type {HTMLButtonElement} */
+  const fftResetZoomBtn = document.getElementById('fftResetZoomBtn');
 
   // Элементы раздела «Речь (форманты)»
   /** @type {HTMLButtonElement} */
@@ -125,6 +127,31 @@
   const speechCtx = speechCanvas ? speechCanvas.getContext('2d') : null;
   /** @type {HTMLDivElement} */
   const speechInfo = document.getElementById('speechInfo');
+  /** @type {HTMLInputElement} */
+  const ttsTextEl = document.getElementById('ttsText');
+  /** @type {HTMLButtonElement} */
+  const ttsSpeakBtn = document.getElementById('ttsSpeakBtn');
+  // Новые элементы: глоттальный источник, преэмфаза, морфинг гласных
+  /** @type {HTMLSelectElement} */
+  const glottalModelEl = document.getElementById('glottalModel');
+  /** @type {HTMLInputElement} */
+  const OqEl = document.getElementById('Oq');
+  /** @type {HTMLInputElement} */
+  const RqEl = document.getElementById('Rq');
+  /** @type {HTMLInputElement} */
+  const preEmphEl = document.getElementById('preEmph');
+  /** @type {HTMLInputElement} */
+  const preEmphAEl = document.getElementById('preEmphA');
+  /** @type {HTMLSelectElement} */
+  const vowelPresetFromEl = document.getElementById('vowelPresetFrom');
+  /** @type {HTMLSelectElement} */
+  const vowelPresetToEl = document.getElementById('vowelPresetTo');
+  /** @type {HTMLInputElement} */
+  const morphAlphaEl = document.getElementById('morphAlpha');
+  /** @type {HTMLSelectElement} */
+  const tractModelEl = document.getElementById('tractModel');
+  /** @type {HTMLButtonElement} */
+  const demoVowelsBtn = document.getElementById('demoVowelsBtn');
 
   // Текущее собранное аудио (последний рассчитанный буфер)
   let lastBuffer = null; // Float32Array
@@ -138,6 +165,15 @@
   // Буфер речи
   let speechBuffer = null; // Float32Array
   let speechMeta = null;   // { Fs, N, T }
+
+  // Состояние спектра для зума/панорамы
+  let lastFFT = null; // { mags, freqs, Nfft, Fs }
+  let lastPeaks = [];
+  let fftFmin = 0;
+  let fftFmax = 0; // при 0 — инициализация до Fs/2
+  let fftCursorFreq = null;
+  let isFftPanning = false;
+  let fftPanStartX = 0;
 
   // Типы сигналов и их «особый» параметр (duty/τ/f1)
   const TYPES = [
@@ -571,6 +607,27 @@
     }
   }
 
+  function applyVowelMorph() {
+    if (!vowelPresetFromEl || !vowelPresetToEl || !genderEl || !morphAlphaEl) return;
+    const a = clamp(parseFloat(morphAlphaEl.value) || 0, 0, 1);
+    const from = VOWEL_PRESETS[vowelPresetFromEl.value] || VOWEL_PRESETS.a;
+    const to = VOWEL_PRESETS[vowelPresetToEl.value] || VOWEL_PRESETS.i;
+    const scale = (genderEl.value === 'female') ? 1.2 : 1.0;
+    const lerp = (u, v) => (1 - a) * u + a * v;
+    const F1 = lerp(from.F1, to.F1) * scale;
+    const B1 = lerp(from.B1, to.B1);
+    const F2 = lerp(from.F2, to.F2) * scale;
+    const B2 = lerp(from.B2, to.B2);
+    const F3 = lerp(from.F3, to.F3) * scale;
+    const B3 = lerp(from.B3, to.B3);
+    F1El.value = String(Math.round(F1));
+    B1El.value = String(Math.round(B1));
+    F2El.value = String(Math.round(F2));
+    B2El.value = String(Math.round(B2));
+    F3El.value = String(Math.round(F3));
+    B3El.value = String(Math.round(B3));
+  }
+
   // Отрисовка сигнала на Canvas с учётом окна просмотра
   function drawWave(arr) {
     const W = canvas.width;
@@ -655,6 +712,7 @@
   function playCurrent() {
     if (!lastBuffer) recalcAndDraw();
     const ctx = ensureAudioCtx();
+    if (ctx.state === 'suspended') try { ctx.resume(); } catch {}
 
     // Создаём буфер и заливаем данные
     const ch = 1;
@@ -911,8 +969,13 @@
     fftCtx.lineTo(W, H - 20);
     fftCtx.stroke();
 
-    const maxFreq = (lastComputed?.Fs || getFs()) / 2;
-    const xOfF = (f) => (f / maxFreq) * W;
+    const Fs = lastFFT?.Fs ?? (lastComputed?.Fs || getFs());
+    const fullFmax = Fs / 2;
+    // Текущее окно просмотра по частоте
+    const fMin = clamp(fftFmin, 0, fullFmax);
+    const fMax = clamp(fftFmax || fullFmax, fMin + 1e-6, fullFmax);
+    const span = fMax - fMin;
+    const xOfF = (f) => ((f - fMin) / span) * W;
 
     // Вычисляем амплитуды: линейные или дБ
     const useDb = isFFTLog();
@@ -937,17 +1000,22 @@
       fftCtx.strokeStyle = '#58a6ff';
       fftCtx.lineWidth = 1.5;
       fftCtx.beginPath();
-      for (let i = 0; i < values.length; i++) {
-        const x = xOfF(freqs[i]);
+      let started = false;
+      for (let i = 0; i < mags.length; i++) {
+        const f = freqs[i];
+        if (f < fMin || f > fMax) continue;
+        const x = xOfF(f);
         const y = yOfDb(values[i]);
-        if (i === 0) fftCtx.moveTo(x, y); else fftCtx.lineTo(x, y);
+        if (!started) { fftCtx.moveTo(x, y); started = true; }
+        else fftCtx.lineTo(x, y);
       }
-      fftCtx.stroke();
+      if (started) fftCtx.stroke();
 
       // Пики
       fftCtx.fillStyle = '#ffa657';
       fftCtx.strokeStyle = '#ffa657';
       for (const p of peaks) {
+        if (p.freq < fMin || p.freq > fMax) continue;
         const x = xOfF(p.freq);
         const y = yOfDb(20 * Math.log10(p.mag + 1e-12));
         fftCtx.beginPath();
@@ -961,23 +1029,28 @@
       let vmax = 0;
       for (let i = 0; i < mags.length; i++) if (mags[i] > vmax) vmax = mags[i];
       const yOf = (v) => {
-        const t = v / (vmax + 1e-12);
+        const t = v / (vmax + 1e-9);
         return (1 - t) * (H - 30) + 10;
       };
       fftCtx.strokeStyle = '#58a6ff';
       fftCtx.lineWidth = 1.5;
       fftCtx.beginPath();
+      let started = false;
       for (let i = 0; i < mags.length; i++) {
-        const x = xOfF(freqs[i]);
+        const f = freqs[i];
+        if (f < fMin || f > fMax) continue;
+        const x = xOfF(f);
         const y = yOf(mags[i]);
-        if (i === 0) fftCtx.moveTo(x, y); else fftCtx.lineTo(x, y);
+        if (!started) { fftCtx.moveTo(x, y); started = true; }
+        else fftCtx.lineTo(x, y);
       }
-      fftCtx.stroke();
+      if (started) fftCtx.stroke();
 
       // Пики
       fftCtx.fillStyle = '#ffa657';
       fftCtx.strokeStyle = '#ffa657';
       for (const p of peaks) {
+        if (p.freq < fMin || p.freq > fMax) continue;
         const x = xOfF(p.freq);
         const y = yOf(p.mag);
         fftCtx.beginPath();
@@ -987,17 +1060,67 @@
         fftCtx.fillText(`${Math.round(p.freq)} Гц`, x + 4, y - 4);
       }
     }
+    // Вертикальная линия курсора
+    if (fftCursorFreq != null && fftCursorFreq >= fMin && fftCursorFreq <= fMax) {
+      const x = xOfF(fftCursorFreq);
+      fftCtx.strokeStyle = '#6e7681';
+      fftCtx.setLineDash([4, 4]);
+      fftCtx.beginPath();
+      fftCtx.moveTo(x, 0);
+      fftCtx.lineTo(x, H - 20);
+      fftCtx.stroke();
+      fftCtx.setLineDash([]);
+    }
+  }
+
+  function updateFFTInfo() {
+    if (!fftInfo || !lastFFT) return;
+    const { Nfft, Fs } = lastFFT;
+    const df = Fs / Nfft;
+    let cursorText = '';
+    if (fftCursorFreq != null) {
+      const i = nearestBinIndex(fftCursorFreq);
+      if (i >= 0) {
+        const useDb = isFFTLog();
+        const mag = lastFFT.mags[i];
+        const val = useDb ? (20 * Math.log10(mag + 1e-12)) : mag;
+        cursorText = ` | курсор: f≈${fftCursorFreq.toFixed(1)} Гц, ${useDb ? 'дБ' : 'A'}≈${useDb ? val.toFixed(1) : val.toFixed(3)}`;
+      }
+    }
+    fftInfo.textContent = `N=${Nfft}, Δf≈${df.toFixed(2)} Гц, окно: [${Math.round(fftFmin)}..${Math.round(fftFmax)}] Гц` + cursorText;
+  }
+
+  function nearestBinIndex(freq) {
+    if (!lastFFT) return -1;
+    const { freqs } = lastFFT;
+    // бинарный поиск ближайшей частоты
+    let lo = 0, hi = freqs.length - 1;
+    while (lo <= hi) {
+      const mid = (lo + hi) >> 1;
+      if (freqs[mid] < freq) lo = mid + 1; else hi = mid - 1;
+    }
+    const i1 = clamp(lo, 0, freqs.length - 1);
+    const i0 = Math.max(0, i1 - 1);
+    return (Math.abs(freqs[i0] - freq) <= Math.abs(freqs[i1] - freq)) ? i0 : i1;
   }
 
   function recalcFFTAndDraw() {
     if (!fftCanvas) return;
     const { mags, freqs, Nfft, Fs } = computeFFT();
-    const peaks = findPeaks(mags, freqs, getPeakCount());
-    drawSpectrum(mags, freqs, peaks);
-    if (fftInfo) {
-      const df = Fs / Nfft;
-      fftInfo.textContent = `N=${Nfft}, Δf≈${df.toFixed(2)} Гц, пики: ${peaks.map(p => `${Math.round(p.freq)} Гц`).join(', ')}`;
+    lastFFT = { mags, freqs, Nfft, Fs };
+    lastPeaks = findPeaks(mags, freqs, getPeakCount());
+    // Инициализация/проверка окна просмотра
+    const fMaxFull = Fs / 2;
+    if (fftFmax <= 0 || fftFmax > fMaxFull || fftFmin < 0 || (fftFmax - fftFmin) < (Fs / Nfft)) {
+      fftFmin = 0;
+      fftFmax = fMaxFull;
+    } else {
+      // поджать к границам, если поменялся Fs
+      fftFmin = clamp(fftFmin, 0, fMaxFull);
+      fftFmax = clamp(fftFmax, fftFmin + (Fs / Nfft), fMaxFull);
     }
+    drawSpectrum(mags, freqs, lastPeaks);
+    updateFFTInfo();
   }
 
   // Переключение вкладок
@@ -1005,8 +1128,10 @@
     if (!vizSection || !spectrumSection) return;
     tabTime?.classList.add('active');
     tabFFT?.classList.remove('active');
+    tabSpeech?.classList.remove('active');
     vizSection.classList.remove('hidden');
     spectrumSection.classList.add('hidden');
+    speechSection?.classList.add('hidden');
   }
   function showFFTTab() {
     if (!vizSection || !spectrumSection) return;
@@ -1038,6 +1163,13 @@
   windowTypeEl?.addEventListener('change', recalcFFTAndDraw);
   fftLogEl?.addEventListener('change', recalcFFTAndDraw);
   peakCountEl?.addEventListener('input', recalcFFTAndDraw);
+  fftResetZoomBtn?.addEventListener('click', () => {
+    if (!lastFFT) return;
+    fftFmin = 0;
+    fftFmax = lastFFT.Fs / 2;
+    drawSpectrum(lastFFT.mags, lastFFT.freqs, lastPeaks);
+    updateFFTInfo();
+  });
 
   // ===== Формантный синтез речи =====
   const VOWEL_PRESETS = {
@@ -1072,6 +1204,17 @@
   // Синхронизация F0 ползунок↔число
   f0RangeEl?.addEventListener('input', () => { if (f0NumberEl) f0NumberEl.value = f0RangeEl.value; });
   f0NumberEl?.addEventListener('input', () => { if (f0RangeEl) f0RangeEl.value = f0NumberEl.value; });
+  // Морфинг и прочие параметры — пересчёт при изменении
+  morphAlphaEl?.addEventListener('input', () => { applyVowelMorph(); synthSpeech(); drawSpeech(); });
+  vowelPresetFromEl?.addEventListener('change', () => { applyVowelMorph(); synthSpeech(); drawSpeech(); });
+  vowelPresetToEl?.addEventListener('change', () => { applyVowelMorph(); synthSpeech(); drawSpeech(); });
+  glottalModelEl?.addEventListener('change', () => { synthSpeech(); drawSpeech(); });
+  OqEl?.addEventListener('input', () => { synthSpeech(); drawSpeech(); });
+  RqEl?.addEventListener('input', () => { synthSpeech(); drawSpeech(); });
+  preEmphEl?.addEventListener('change', () => { synthSpeech(); drawSpeech(); });
+  preEmphAEl?.addEventListener('input', () => { synthSpeech(); drawSpeech(); });
+  tractModelEl?.addEventListener('change', () => { synthSpeech(); drawSpeech(); });
+  demoVowelsBtn?.addEventListener('click', () => { playDemoVowels(); });
 
   // Преобразование частоты и добротности в коэффициенты би-квадратного полосового фильтра (RBJ)
   function biquadBandpassCoeffs(Fs, Fc, B) {
@@ -1090,15 +1233,23 @@
   }
 
   function processBiquad(x, coeffs) {
+    // Нормализация коэффициентов и реализация RBJ biquad в виде
+    // транспонированной прямой формы II (устойчиво и корректно по амплитуде)
     const y = new Float32Array(x.length);
-    let z1 = 0, z2 = 0; // Direct Form I implementation (transposed would be better but fine)
     const { b0, b1, b2, a0, a1, a2 } = coeffs;
+    const invA0 = 1 / a0;
+    const b0a = b0 * invA0;
+    const b1a = b1 * invA0;
+    const b2a = b2 * invA0;
+    const a1a = a1 * invA0;
+    const a2a = a2 * invA0;
+    let z1 = 0, z2 = 0;
     for (let n = 0; n < x.length; n++) {
       const xn = x[n];
-      const yn = (b0 * xn + z1) / a0;
-      z1 = b1 * xn + z2 - a1 * yn;
-      z2 = b2 * xn - a2 * yn;
-      y[n] = yn;
+      const out = b0a * xn + z1;
+      z1 = b1a * xn - a1a * out + z2;
+      z2 = b2a * xn - a2a * out;
+      y[n] = out;
     }
     return y;
   }
@@ -1116,35 +1267,101 @@
     const B2 = clamp(parseFloat(B2El?.value || '90'), 10, 1000);
     const F3 = clamp(parseFloat(F3El?.value || '2440'), 50, 8000);
     const B3 = clamp(parseFloat(B3El?.value || '120'), 10, 1200);
+    const tractModel = tractModelEl?.value || 'parallel';
 
-    // Источник: импульсный поезд на F0 + белый шум
+    // Источник: выбранная глоттальная модель + шум
     const x = new Float32Array(N);
-    let phase = 0;
-    const dphi = f0 / Fs;
+    const model = glottalModelEl?.value || 'impulse';
+    let phase = 0; // фаза в циклах (0..1)
+    // Небольшой вибрато+джиттер для живости
+    const vibDepth = 0.01; // ±1%
+    const vibRate = 5;     // 5 Гц
+    let jitterVal = 0;     // ±0.3%
+    const jitterDepth = 0.003;
+    const Oq = clamp(parseFloat(OqEl?.value || '0.6'), 0.3, 0.9);
+    const Rq = clamp(parseFloat(RqEl?.value || '0.1'), 0.05, 0.4);
+    let prevUg = 0;
     for (let n = 0; n < N; n++) {
+      const t = n / Fs;
+      const f0inst = f0 * (1 + vibDepth * Math.sin(2 * Math.PI * vibRate * t) + jitterVal);
+      const dphi = f0inst / Fs;
       phase += dphi;
+      if (phase >= 1.0) phase -= 1.0;
       let voiced = 0;
-      if (phase >= 1.0) { phase -= 1.0; voiced = 1.0; } // узкий импульс
-      const noise = (Math.random() * 2 - 1);
-      x[n] = voicedLvl * voiced + noiseLvl * noise * 0.3; // шум приглушим
+      if (model === 'impulse') {
+        // узкий импульс в начале периода
+        voiced = (phase < dphi) ? 1.0 : 0.0;
+      } else {
+        // Rosenberg: формируем поток Ug(phase), берём дискретную производную как возбуждение
+        const Tc = Oq; // конец открытой фазы
+        const Ta = Math.max(1e-4, Oq * (1 - Rq));
+        let Ug = 0;
+        if (phase < Ta) {
+          Ug = 0.5 * (1 - Math.cos(Math.PI * (phase / Ta)));
+        } else if (phase < Tc) {
+          const denom = 2 * (Tc - Ta) + 1e-9;
+          Ug = Math.cos((Math.PI * (phase - Ta)) / denom) ** 2;
+        } else {
+          Ug = 0;
+        }
+        const deriv = Ug - prevUg;
+        prevUg = Ug;
+        voiced = deriv;
+      }
+      // При прохождении через ноль фазы — обновим джиттер
+      if (phase < dphi) {
+        jitterVal = (Math.random() * 2 - 1) * jitterDepth;
+      }
+      const noise = (Math.random() * 2 - 1) * 0.3;
+      x[n] = voicedLvl * voiced + noiseLvl * noise;
+    }
+
+    // Преэмфаза (y[n] = x[n] - a*x[n-1])
+    if (preEmphEl?.checked) {
+      const a = clamp(parseFloat(preEmphAEl?.value || '0.97'), 0, 0.99);
+      let prev = 0;
+      for (let n = 0; n < N; n++) {
+        const xn = x[n];
+        x[n] = xn - a * prev;
+        prev = xn;
+      }
     }
 
     // Фильтры формант
     const c1 = biquadBandpassCoeffs(Fs, F1, B1);
     const c2 = biquadBandpassCoeffs(Fs, F2, B2);
     const c3 = biquadBandpassCoeffs(Fs, F3, B3);
-    const y1 = processBiquad(x, c1);
-    const y2 = processBiquad(x, c2);
-    const y3 = processBiquad(x, c3);
     const y = new Float32Array(N);
-    for (let n = 0; n < N; n++) y[n] = y1[n] + y2[n] + y3[n];
+    if (tractModel === 'cascade') {
+      // Каскадный тракт: последовательные резонаторы
+      const s1 = processBiquad(x, c1);
+      const s2 = processBiquad(s1, c2);
+      const s3 = processBiquad(s2, c3);
+      for (let n = 0; n < N; n++) y[n] = s3[n];
+    } else {
+      // Параллельный тракт: сумма трёх резонаторов
+      const y1 = processBiquad(x, c1);
+      const y2 = processBiquad(x, c2);
+      const y3 = processBiquad(x, c3);
+      for (let n = 0; n < N; n++) y[n] = y1[n] + y2[n] + y3[n];
+    }
 
-    // Нормализация, чтобы избежать клиппинга
+    // Амплитудная огибающая (атака/спад), чтобы убрать щелчки и добавить естественности
+    const att = Math.max(1, Math.floor(0.01 * Fs));
+    const rel = Math.max(1, Math.floor(0.05 * Fs));
+    for (let n = 0; n < N; n++) {
+      let env = 1;
+      if (n < att) env = n / att;
+      else if (n > N - rel) env = (N - n) / rel;
+      y[n] *= env;
+    }
+
+    // Нормализация: масштабируем к целевому пику ~0.95, если есть ненулевая энергия
     let maxAbs = 0; for (let n = 0; n < N; n++) maxAbs = Math.max(maxAbs, Math.abs(y[n]));
-    if (maxAbs > 0.99) { const k = 0.99 / maxAbs; for (let n = 0; n < N; n++) y[n] *= k; }
+    if (maxAbs > 1e-9) { const k = 0.95 / maxAbs; for (let n = 0; n < N; n++) y[n] *= k; }
 
     speechBuffer = y;
-    speechMeta = { Fs, N, T, f0, F1, F2, F3 };
+    speechMeta = { Fs, N, T, f0, F1, F2, F3, model };
   }
 
   function drawSpeech() {
@@ -1157,6 +1374,7 @@
     if (!speechBuffer) synthSpeech();
     if (!speechBuffer || !speechMeta) return;
     const ctx = ensureAudioCtx();
+    if (ctx.state === 'suspended') try { ctx.resume(); } catch {}
     const audioBuf = ctx.createBuffer(1, speechBuffer.length, speechMeta.Fs);
     audioBuf.copyToChannel(speechBuffer, 0);
     stopPlayback();
@@ -1214,6 +1432,259 @@
   synthSpeechBtn?.addEventListener('click', () => { synthSpeech(); drawSpeech(); });
   playSpeechBtn?.addEventListener('click', () => { playSpeech(); });
   exportSpeechBtn?.addEventListener('click', () => { exportSpeechWav(); });
+
+  // ===== Обработчики мыши для зума/панорамы спектра =====
+  if (fftCanvas) {
+    fftCanvas.addEventListener('wheel', (e) => {
+      if (!lastFFT) return;
+      e.preventDefault();
+      const rect = fftCanvas.getBoundingClientRect();
+      const x = e.clientX - rect.left;
+      const W = rect.width;
+      const fMin = fftFmin;
+      const fMax = fftFmax;
+      const span = fMax - fMin;
+      const fUnder = fMin + (x / W) * span;
+      const delta = Math.sign(e.deltaY);
+      const factor = delta > 0 ? 1.1 : 0.9; // 10% шаг
+      const Fs = lastFFT.Fs;
+      const minSpan = Math.max(Fs / lastFFT.Nfft, 5); // не меньше df и 5 Гц
+      const maxSpan = Fs / 2;
+      let newSpan = clamp(span * factor, minSpan, maxSpan);
+      // сохраняем точку под курсором
+      let newMin = fUnder - (x / W) * newSpan;
+      let newMax = newMin + newSpan;
+      const fullMin = 0, fullMax = Fs / 2;
+      // поджать к границам
+      if (newMin < fullMin) { newMin = fullMin; newMax = newMin + newSpan; }
+      if (newMax > fullMax) { newMax = fullMax; newMin = newMax - newSpan; }
+      fftFmin = newMin;
+      fftFmax = newMax;
+      fftCursorFreq = fUnder;
+      drawSpectrum(lastFFT.mags, lastFFT.freqs, lastPeaks);
+      updateFFTInfo();
+    }, { passive: false });
+
+    fftCanvas.addEventListener('mousedown', (e) => {
+      isFftPanning = true;
+      fftPanStartX = e.clientX;
+    });
+    window.addEventListener('mouseup', () => { isFftPanning = false; });
+    window.addEventListener('mousemove', (e) => {
+      if (!lastFFT) return;
+      const rect = fftCanvas.getBoundingClientRect();
+      const x = e.clientX - rect.left;
+      const W = rect.width;
+      const span = (fftFmax - fftFmin) || (lastFFT.Fs / 2);
+      const fUnder = fftFmin + (clamp(x, 0, W) / W) * span;
+      fftCursorFreq = clamp(fUnder, 0, lastFFT.Fs / 2);
+      if (isFftPanning) {
+        const dx = e.clientX - fftPanStartX;
+        fftPanStartX = e.clientX;
+        const hzPerPx = span / W;
+        let newMin = fftFmin - dx * hzPerPx;
+        let newMax = fftFmax - dx * hzPerPx;
+        const fullMin = 0, fullMax = lastFFT.Fs / 2;
+        const minSpan = Math.max(lastFFT.Fs / lastFFT.Nfft, 5);
+        const curSpan = newMax - newMin;
+        // защита от выхода за границы
+        if (newMin < fullMin) { newMin = fullMin; newMax = newMin + curSpan; }
+        if (newMax > fullMax) { newMax = fullMax; newMin = newMax - curSpan; }
+        // защита от слишком узкого окна
+        if (curSpan < minSpan) { newMax = newMin + minSpan; }
+        fftFmin = newMin;
+        fftFmax = newMax;
+      }
+      drawSpectrum(lastFFT.mags, lastFFT.freqs, lastPeaks);
+      updateFFTInfo();
+    });
+  }
+  ttsSpeakBtn?.addEventListener('click', () => {
+    const text = (ttsTextEl?.value || '').trim();
+    if (!text) return;
+    speakText(text);
+  });
+
+  // ===== Простейший TTS поверх формантного движка =====
+  const RU_VOWEL_MAP = {
+    'а': 'a', 'я': 'a',
+    'э': 'e', 'е': 'e',
+    'и': 'i', 'ы': 'i', // приближение
+    'о': 'o', 'ё': 'o',
+    'у': 'u', 'ю': 'u',
+  };
+
+  function presetByKey(key) { return VOWEL_PRESETS[key] || VOWEL_PRESETS.a; }
+
+  function genExcitation(Fs, N, f0, model, Oq, Rq, voicedLvl, noiseLvl) {
+    const x = new Float32Array(N);
+    let phase = 0;
+    let prevUg = 0;
+    for (let n = 0; n < N; n++) {
+      phase += f0 / Fs;
+      if (phase >= 1) phase -= 1;
+      let voiced = 0;
+      if (model === 'impulse') {
+        voiced = (phase < (f0 / Fs)) ? 1 : 0;
+      } else {
+        const Tc = Oq; const Ta = Math.max(1e-4, Oq * (1 - Rq));
+        let Ug = 0;
+        if (phase < Ta) Ug = 0.5 * (1 - Math.cos(Math.PI * (phase / Ta)));
+        else if (phase < Tc) { const denom = 2 * (Tc - Ta) + 1e-9; Ug = Math.cos((Math.PI * (phase - Ta)) / denom) ** 2; }
+        else Ug = 0;
+        const deriv = Ug - prevUg; prevUg = Ug; voiced = deriv;
+      }
+      const noise = (Math.random() * 2 - 1) * 0.3;
+      x[n] = voicedLvl * voiced + noiseLvl * noise;
+    }
+    return x;
+  }
+
+  function preEmphasisInplace(x, a) {
+    let prev = 0; for (let n = 0; n < x.length; n++) { const xn = x[n]; x[n] = xn - a * prev; prev = xn; }
+  }
+
+  function filterFormants(x, Fs, tractModel, F1,B1,F2,B2,F3,B3) {
+    const c1 = biquadBandpassCoeffs(Fs, F1, B1);
+    const c2 = biquadBandpassCoeffs(Fs, F2, B2);
+    const c3 = biquadBandpassCoeffs(Fs, F3, B3);
+    if (tractModel === 'cascade') {
+      return processBiquad(processBiquad(processBiquad(x, c1), c2), c3);
+    } else {
+      const y1 = processBiquad(x, c1);
+      const y2 = processBiquad(x, c2);
+      const y3 = processBiquad(x, c3);
+      const y = new Float32Array(x.length);
+      for (let i = 0; i < x.length; i++) y[i] = y1[i] + y2[i] + y3[i];
+      return y;
+    }
+  }
+
+  function applyEnvelopeInplace(y, Fs) {
+    const N = y.length;
+    const att = Math.max(1, Math.floor(0.01 * Fs));
+    const rel = Math.max(1, Math.floor(0.05 * Fs));
+    for (let n = 0; n < N; n++) {
+      let env = 1;
+      if (n < att) env = n / att;
+      else if (n > N - rel) env = (N - n) / rel;
+      y[n] *= env;
+    }
+  }
+
+  function synthFormantSegment(Fs, durationSec, f0, model, Oq, Rq, tractModel, preEmph, preA, voicedLvl, noiseLvl, formants) {
+    const N = Math.max(1, Math.floor(Fs * durationSec));
+    const x = genExcitation(Fs, N, f0, model, Oq, Rq, voicedLvl, noiseLvl);
+    if (preEmph) preEmphasisInplace(x, preA);
+    const y = filterFormants(x, Fs, tractModel, formants.F1, formants.B1, formants.F2, formants.B2, formants.F3, formants.B3);
+    applyEnvelopeInplace(y, Fs);
+    // нормализация секции к пику ~0.9
+    let m = 0; for (let i = 0; i < y.length; i++) m = Math.max(m, Math.abs(y[i]));
+    if (m > 1e-9) { const k = 0.9 / m; for (let i = 0; i < y.length; i++) y[i] *= k; }
+    return y;
+  }
+
+  function speakText(text) {
+    const Fs = getFs();
+    const model = glottalModelEl?.value || 'rosenberg';
+    const tractModel = tractModelEl?.value || 'cascade';
+    const Oq = clamp(parseFloat(OqEl?.value || '0.6'), 0.3, 0.9);
+    const Rq = clamp(parseFloat(RqEl?.value || '0.1'), 0.05, 0.4);
+    const preEmph = !!preEmphEl?.checked;
+    const preA = clamp(parseFloat(preEmphAEl?.value || '0.97'), 0, 0.99);
+    const baseF0 = clamp(parseFloat(f0NumberEl?.value || f0RangeEl?.value || '140'), 40, 400);
+
+    const units = [];
+    const lower = text.toLowerCase();
+    for (const ch of lower) {
+      if (ch === ' ') { units.push({ type: 'pause', dur: 0.08 }); continue; }
+      const vkey = RU_VOWEL_MAP[ch];
+      if (vkey) {
+        const p = presetByKey(vkey);
+        units.push({ type: 'vowel', dur: 0.18, p });
+        continue;
+      }
+      // Простейшие согласные: шумовые вставки
+      if ('сзшжщчфхц'.includes(ch)) { units.push({ type: 'sibilant', dur: 0.12 }); continue; }
+      if ('ммннглрйвпбтдкг'.includes(ch)) { units.push({ type: 'voiced', dur: 0.10 }); continue; }
+      // неизвестные символы — короткая пауза
+      units.push({ type: 'pause', dur: 0.06 });
+    }
+
+    // Сборка звука
+    const segments = [];
+    let lastFormants = null;
+    for (const u of units) {
+      if (u.type === 'pause') {
+        segments.push(new Float32Array(Math.floor(Fs * u.dur)));
+      } else if (u.type === 'vowel') {
+        const formants = { F1: u.p.F1, B1: u.p.B1, F2: u.p.F2, B2: u.p.B2, F3: u.p.F3, B3: u.p.B3 };
+        // Небольшая подстройка огласовки: чуть больше шума на мягких
+        const voicedLvl = 1.0;
+        const noiseLvl = 0.04;
+        const seg = synthFormantSegment(Fs, u.dur, baseF0, model, Oq, Rq, tractModel, preEmph, preA, voicedLvl, noiseLvl, formants);
+        // Добавим мини-переход: если предыдущие форманты есть — краткий морф 40 мс
+        if (lastFormants) {
+          const a = 0.04; // 40мс
+          const mid = synthFormantSegment(Fs, a, baseF0, model, Oq, Rq, tractModel, preEmph, preA, voicedLvl, noiseLvl, {
+            F1: (lastFormants.F1 * 0.3 + formants.F1 * 0.7), B1: (lastFormants.B1 * 0.5 + formants.B1 * 0.5),
+            F2: (lastFormants.F2 * 0.3 + formants.F2 * 0.7), B2: (lastFormants.B2 * 0.5 + formants.B2 * 0.5),
+            F3: (lastFormants.F3 * 0.3 + formants.F3 * 0.7), B3: (lastFormants.B3 * 0.5 + formants.B3 * 0.5),
+          });
+          segments.push(mid);
+        }
+        segments.push(seg);
+        lastFormants = formants;
+      } else if (u.type === 'sibilant') {
+        // «С»/«Ш» приближённо: шум + высокочастотные форманты
+        const formants = { F1: 1500, B1: 600, F2: 3500, B2: 800, F3: 5500, B3: 1200 };
+        const seg = synthFormantSegment(Fs, u.dur, baseF0, model, Oq, Rq, tractModel, preEmph, preA, 0.0, 0.6, formants);
+        segments.push(seg);
+      } else if (u.type === 'voiced') {
+        const formants = lastFormants || presetByKey('a');
+        const f = { F1: formants.F1 || 700, B1: 100, F2: formants.F2 || 1100, B2: 120, F3: formants.F3 || 2400, B3: 140 };
+        const seg = synthFormantSegment(Fs, u.dur, baseF0, model, Oq, Rq, tractModel, preEmph, preA, 0.7, 0.1, f);
+        segments.push(seg);
+      }
+    }
+
+    // Конкатенация
+    let totalN = 0; for (const s of segments) totalN += s.length;
+    const y = new Float32Array(totalN);
+    let pos = 0; for (const s of segments) { y.set(s, pos); pos += s.length; }
+
+    // Воспроизвести
+    speechBuffer = y;
+    speechMeta = { Fs, N: y.length, T: y.length / Fs, f0: baseF0 };
+    drawSpeech();
+    playSpeech();
+  }
+
+  // Демо: последовательное проигрывание гласных а-э-и-о-у
+  function playDemoVowels() {
+    const seq = ['a', 'e', 'i', 'o', 'u'];
+    let idx = 0;
+    const playNext = () => {
+      if (idx >= seq.length) return;
+      if (vowelPresetEl) {
+        vowelPresetEl.value = seq[idx];
+        applyVowelPreset();
+      }
+      synthSpeech();
+      const ctx = ensureAudioCtx();
+      const audioBuf = ctx.createBuffer(1, speechBuffer.length, speechMeta.Fs);
+      audioBuf.copyToChannel(speechBuffer, 0);
+      stopPlayback();
+      const node = ctx.createBufferSource();
+      node.buffer = audioBuf;
+      node.connect(ctx.destination);
+      node.start();
+      currentSourceNode = node;
+      stopBtn.disabled = false;
+      node.onended = () => { idx++; playNext(); };
+    };
+    playNext();
+  }
 
   // События масштабирования окна
   function syncViewLen(valMs) {

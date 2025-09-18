@@ -66,7 +66,50 @@
       <label for="voicedLevel">Voiced:</label>
       <input id="voicedLevel" type="range" min="0" max="1" step="0.01" value="1" />
       <label for="noiseLevel">Noise:</label>
-      <input id="noiseLevel" type="range" min="0" max="1" step="0.01" value="0.0" />
+      <input id="noiseLevel" type="range" min="0" max="1" step="0.01" value="0.05" />
+    </div>
+    <div class="control-group">
+      <label for="glottalModel">Источник:</label>
+      <select id="glottalModel">
+        <option value="impulse" selected>Импульсы</option>
+        <option value="rosenberg">Rosenberg</option>
+      </select>
+      <label for="Oq">Oq</label>
+      <input id="Oq" type="number" min="0.3" max="0.9" step="0.01" value="0.6" />
+      <label for="Rq">Rq</label>
+      <input id="Rq" type="number" min="0.05" max="0.4" step="0.01" value="0.1" />
+      <label for="preEmph">Преэмфаза</label>
+      <input id="preEmph" type="checkbox" />
+      <label for="preEmphA">a</label>
+      <input id="preEmphA" type="number" min="0" max="0.99" step="0.01" value="0.97" />
+    </div>
+    <div class="control-group">
+      <label for="tractModel">Тракт:</label>
+      <select id="tractModel">
+        <option value="parallel">Параллель</option>
+        <option value="cascade" selected>Каскад</option>
+      </select>
+      <button id="demoVowelsBtn">Демо: а-э-и-о-у</button>
+    </div>
+    <div class="control-group">
+      <label for="vowelPresetFrom">Морфинг: от</label>
+      <select id="vowelPresetFrom">
+        <option value="a" selected>А [a]</option>
+        <option value="e">Э [e]</option>
+        <option value="i">И [i]</option>
+        <option value="o">О [o]</option>
+        <option value="u">У [u]</option>
+      </select>
+      <label for="vowelPresetTo">до</label>
+      <select id="vowelPresetTo">
+        <option value="a">А [a]</option>
+        <option value="e">Э [e]</option>
+        <option value="i" selected>И [i]</option>
+        <option value="o">О [o]</option>
+        <option value="u">У [u]</option>
+      </select>
+      <label for="morphAlpha">α</label>
+      <input id="morphAlpha" type="range" min="0" max="1" step="0.01" value="0" />
     </div>
     <div class="source-card">
       <div class="source-row">
@@ -82,6 +125,11 @@
       <button id="synthSpeechBtn">Синтезировать</button>
       <button id="playSpeechBtn">Проиграть</button>
       <button id="exportSpeechBtn">Экспорт WAV</button>
+    </div>
+    <div class="control-group">
+      <label for="ttsText">Текст:</label>
+      <input id="ttsText" type="text" value="ма ма па па" style="min-width: 320px;" />
+      <button id="ttsSpeakBtn">Озвучить текст</button>
     </div>
     <canvas id="speechCanvas" width="1000" height="240"></canvas>
     <div id="speechInfo" class="badge"></div>
@@ -148,6 +196,7 @@
       <label for="peakCount">Пики (шт):</label>
       <input id="peakCount" type="number" min="0" max="20" step="1" value="5" />
       <button id="recalcFFTBtn">Пересчитать спектр</button>
+      <button id="fftResetZoomBtn">Сброс зума</button>
     </div>
     <canvas id="fftCanvas" width="1000" height="240"></canvas>
     <div id="fftInfo" class="badge"></div>
